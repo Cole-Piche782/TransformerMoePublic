@@ -37,42 +37,47 @@ import copy
 
 
 
-# A variable only relevant for if you want to run the code on the openwebtext dataset
-# If set to true, it causes the program to only download the pre-trained embedding
-# and not actually train the model
+# Relevant only when running the code on the OpenWebText dataset.
+# If True, the program downloads the pre-trained embedding file and skips training the model.
 shouldJustSaveGPTFile = False
 
 
-# 
+# If True, the system selects cluster centroids only and does nothing else.
+# Useful for debugging the cluster centroid selection function.
+# Should not be set to True unless that's the sole intended action.
 shouldJustHelpPickClusterCenters = False
 
-#Never set the below to true in this script, it can only be set to true in the gpt config scripts
+# A variable that tells the system not to read the shift coefficients because they have already been read
+# Never set the below to true in this script, it should only be set to true in the gpt config scripts
 haveReadShiftCoefficients = False
 
-#The below should NEVER be true if you want to actually run the router
-shouldSimplifyForTesting = False
-#the above runs a regular model in the routers place that approaches the router
-
+# The below two build switches should only be set to true in the configuration files. 
+# Never here. They help the system determine which embedding space to use etc.
 shouldUseOpenWebText = False
 shouldUseWordShakeSpeare = False
 
+# If set to false, enables some extra logging of loss and percent accuracy
 shouldOnlyShowEvalOut = False
 
+# The below two build switches disable training and only perform evaluation if set to true.
 shouldJustEstimateLoss = False
 shouldEstimateMoeLoss = False
 
+# Tells us whether to start from scratch, or from a checkpoint
 shouldReloadRouter = False
+
+# A variable to perform some spcial custom training I tried. It failed and so should be
+# Set to false
 shouldIgnoreStronglyCorrectRouterChoices = False
 
+# If set to true, tests the experts under the assumption that the router is 100% accurate
 shouldIdealizeMoeRouterForTests = False
+# If set to true, just trains a regular transformer without my modifications
 shouldUseUntouched = False
 
+# If set to true makes the code print out how long various steps took
 shouldPrintTimes = False
-#if(shouldSimplifyForTesting):
-#    shouldUseUntouched = True
 
-
-shouldUseEmbeddingDivision = True
 #The below should almost ALWAYS be false because we normally want top vs bottom division
 shouldDoCloseToMidDivision = False
 
@@ -80,7 +85,8 @@ shouldDoCloseToMidDivision = False
 #do not change the below variable, it changes throughout the code and needs to start true
 inTraining = False
 
-#default values for shakespeare char
+# default values for how far along the principal axis the centroids of the two clusters
+# are found
 shiftCoefficient0 = 0.25
 shiftCoefficient1 = 0.743
 
@@ -110,7 +116,6 @@ if(shouldJustEstimateLoss):
 
 # wandb logging
 wandb_log = False # disabled by default 
-#wandb_log = True # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
@@ -118,22 +123,17 @@ dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
-# model
-#n_layer = 12 * 2
-#n_head = 12
-#n_embd = 768
-n_layer = int(12/2 + 0.5)
-n_head = int(12/2 + 0.5)
-n_embd = int(768+0.5)
+
+
+n_layer = 6
+n_head = 6
+n_embd = 768
 
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-#max_iters = 0 #THIS GETS OVERWRITTEN BY THE CONFIG FILE THEN RR_OVERWRITTEN LATER BY US!
-#max_iters = 600000 # total number of training iterations
-#max_iters = 1000 # total number of training iterations
-#max_iters = 200 #this gets overridden from the config file and we need to re-overwrite it later
+
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -264,18 +264,6 @@ maxs = 0
 #Warning! The below two variables are only useful for shakespeare char!
 marginShiftCoefficient0 = 0.4
 marginShiftCoefficient1 = 0.6
-
-'''
-if(shouldUseOpenWebText and not haveReadShiftCoefficients):
-    print("Cole, you are now on openwebtext")
-    print("So you need to fix your 2 shift coefficients")
-    exit()
-if(shouldUseWordShakeSpeare and not haveReadShiftCoefficients):
-    print("Cole, you are now on word shakespeare")
-    print("So you need to fix your 2 shift coefficients")
-    exit()
-'''
-
 
 def calculateClusterMeans(expertNum, model):
     global centroid0
