@@ -37,9 +37,13 @@ import copy
 
 
 
-
+# A variable only relevant for if you want to run the code on the openwebtext dataset
+# If set to true, it causes the program to only download the pre-trained embedding
+# and not actually train the model
 shouldJustSaveGPTFile = False
 
+
+# 
 shouldJustHelpPickClusterCenters = False
 
 #Never set the below to true in this script, it can only be set to true in the gpt config scripts
@@ -143,6 +147,7 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+#device = 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -271,7 +276,6 @@ if(shouldUseWordShakeSpeare and not haveReadShiftCoefficients):
     exit()
 '''
 
-#the below two variables don't change later
 
 def calculateClusterMeans(expertNum, model):
     global centroid0
@@ -406,8 +410,8 @@ def calculateClusterMeans(expertNum, model):
             print("absdiff: " + str(absDiff))
             print("margin: " + str(margin))
         
-            print("Cole, your cluster values are too far apart")
-            print("You need to fix that before you can properly train an ai")
+            print("Your cluster values are too far apart")
+            print("You need to fix that before you can properly train a model")
             print("Shutting down")
             exit()
         
@@ -871,7 +875,6 @@ def estimate_loss():
                 hasPrinted = True
             numTargetWords = Y.size()[0] * Y.size()[1] #batch size * block size
             Z = getZ(Y)
-            
             if(not (tempStart == 0)):
                 printTimeIfAppropriate("time for one iteration: " + str(time.time() - tempStart))
             tempStart = time.time()    
@@ -1511,7 +1514,6 @@ while i < len(Y):
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
     embeddingModel = DDP(embeddingModel, device_ids=[ddp_local_rank])
-
 
 
 # logging
