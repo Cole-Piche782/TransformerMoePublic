@@ -37,10 +37,7 @@ import copy
 
 
 
-#to run this script: 
-#python train.py config/train_shakespeare_char.py
-#or alternatively:
-#python -u train.py config/train_gpt2.py > program_output.txt
+
 shouldJustSaveGPTFile = False
 
 shouldJustHelpPickClusterCenters = False
