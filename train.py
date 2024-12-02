@@ -912,19 +912,19 @@ def estimate_expert_loss():
                 expertNum = 1
                 targets1 = transformY(targets1)
                 
+                # see which words to mask for each expert, then call each expert and find accuracy
                 expertNum = 0
                 Z0 = getZ(Y)
                 Z0.to(device)
                 logits0, loss0 = callModel(X, targets0, Z0, model0)
                 expert0PercentCorrect = getPercentCorrectExpertWords(logits0, targets0, Z0, numTargetWords)
-
-
                 expertNum = 1
                 Z = getZ(Y)
                 Z.to(device)
                 logits1, loss1 = callModel(X, targets1, Z, model1)
                 expert1PercentCorrect = getPercentCorrectExpertWords(logits1, targets1, Z, numTargetWords)
 
+                # quickly check if there were any words passed to the model not found in either expert's vocab
                 biggerZ = torch.where(Z>Z0, Z, Z0)
                 isOne = torch.where(biggerZ<1, 1, 0).any()
                 if(isOne):
@@ -937,10 +937,9 @@ def estimate_expert_loss():
                 # Ensure routerOut has the same shape as logits0 and logits1
                 routerChose0_expanded = routerChose0.unsqueeze(-1).repeat(1,1,logits0.size(-1))
 
-                # Combine the logits tensors based on the condition
+                # Combine the logits tensors based on the router output
                 logitsCombined = torch.where(routerChose0_expanded == 1, logits0, logits1)
                 moePercentCorrect = getPercentCorrect(Y, logitsCombined)
-                
                 logits_flat = logitsCombined.view(-1, logitsCombined.size(-1))
 
                 #transform targets into the expert domain so we can evaluate the output:
@@ -948,6 +947,7 @@ def estimate_expert_loss():
                 targets_flat = targets.view(-1)
                 loss = model.get_cross_entropy(logits_flat, targets_flat, ignore_index=-1)
                 if(i%10==0):
+                    # print a detailed log of the score of the whole system, and each of its components
                     print("routerloss: " + str(lossRouter))
                     print("loss0: " + str(loss0))
                     print("loss1: " + str(loss1))
@@ -958,7 +958,9 @@ def estimate_expert_loss():
                     print("moePercentCorrect: " + str(moePercentCorrect))
                     print("have now completed: " + str(i) + " of " + str(eval_iters) + " iterations")
                     print("current split is: " + str(split))            
+            # add the loss to the list of losses
             losses[i] = loss
+        # print out the average loss
         out[split] = losses.mean()
         print("loss for current split is: " + str(out[split]))
     model.train()
@@ -981,15 +983,18 @@ def get_lr(it):
 
 #only where Z contains a 1 does the code actually pay attention to the value. 0 means mask out the value
 def weightClasses(Y, Z):
-    
+    # make note of which indeces correspond to the max and min embeddings
     minEquivalent = 3
     maxEquivalent = 11
 
+    # count up how many times the Y value corresponds to the min and max
     numMins = torch.where(Y == minEquivalent, 1, 0).sum()
     numMaxs = torch.where(Y == maxEquivalent, 1, 0).sum()
+    # find the portion of min values and max values in Y
     totalNum = numMins + numMaxs
     portionMins = float(numMins)/totalNum
     portionMaxs = float(numMaxs)/totalNum
+    # make note of which portion is less and which is more
     greaterPortion = portionMins
     lesserPortion = portionMaxs
     moreFrequentVal = minEquivalent
@@ -997,11 +1002,13 @@ def weightClasses(Y, Z):
         greaterPortion = portionMaxs
         lesserPortion = portionMins 
         moreFrequentVal = maxEquivalent
+    # make the portions the same by keeping only some of the values from the greater portion
+    # decide how many of the values from the greater portion to keep
     portionToKeep = lesserPortion/greaterPortion
     portionToKeep = portionToKeep.to(device)
+    # randomly select which of the values from the greater potion to drop
     randomNumbers = torch.zeros_like(Z)
     randomNumbers = torch.randint(1, 101, randomNumbers.shape)
-
     randomNumbers = randomNumbers.to(device)
     #make it so Z gets set to 0 only where Y == moreFrequentVal and randomNumbers > portionToKeep * 100
     zZeroes = torch.zeros_like(Z)
@@ -1015,14 +1022,12 @@ def weightClasses(Y, Z):
 
 def callModel(X, Y, Z, model):
     global inTraining
+    # call the model, and pass in the mask only if we are working with the modified model
     if(shouldUseUntouched):
         logits, loss = model(X, Y)
         return logits, loss
     else:
         logits, loss = model(X, Y, Z)
-        allOnes = torch.ones_like(Z)
-        total = allOnes.sum()
-        numNumbers = torch.where(Z == 1, 1, 0).sum()
         return logits, loss
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -1062,6 +1067,7 @@ def initGpt2ViaLibrary():
     if block_size < model.config.block_size:
         model.crop_block_size(block_size)
         model_args['block_size'] = block_size # so that the checkpoint will have the right value
+    #move the model the gpu, and set init_from back to its original value
     model.to(device)
     init_from = tempInitFrom
     print("model.wpe.weight.size() 3: " + str(model.transformer.wpe.weight.size()))
@@ -1103,8 +1109,11 @@ def initAnyModel(fileName):
         anyModel = torch.compile(anyModel) # requires PyTorch 2.0
     return anyModel
 
+# get the transformer component of the model so we can work with it directly for purposes
+# such as setting its embedding component to the pre-saved one
 def getModelTransformer(model):
     transformer = ""
+    # get the transformer, whether we are using ddp, or not
     if type(model) == torch.nn.parallel.DistributedDataParallel:
         transformer = model.module.transformer
     else:
@@ -1124,7 +1133,7 @@ def initModel():
     of the two models are alligned if initializing from scratch, that's all
     it does with embeddingModel
     '''
-    global embeddingModel #READ THE ABOVE COMMENT!
+    global embeddingModel #READ THE ABOVE COMMENT
     # model init
     model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                     bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
@@ -1205,6 +1214,7 @@ def initModel():
 
 
 def reloadEmbeddingModelForTests(embeddingModel):
+    # this function reloads the embedding model after saving it to check that it is working
     ckpt_path = os.path.join(out_dir, 'gpt2File.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
 
@@ -1229,8 +1239,11 @@ def reloadEmbeddingModelForTests(embeddingModel):
     print("embedding model post load wpe size: " + str(embeddingModel.transformer.wpe.weight.size()))
     
 embeddingModel = ""
+# handle the case where the embedding model comes from the internet 
+# instead of from another model that we have pretrained
 if((shouldUseWordShakeSpeare or shouldUseOpenWebText)):
     if(shouldJustSaveGPTFile):
+        # download and save the gpt pre-trained embeddings to a file then exit
         embeddingModel = initGpt2ViaLibrary()
         print("embedding model wpe size: " + str(embeddingModel.transformer.wpe.weight.size()))
         model_args = {}
@@ -1246,14 +1259,18 @@ if((shouldUseWordShakeSpeare or shouldUseOpenWebText)):
         torch.save(checkpoint, os.path.join(out_dir, checkPointName))
         exit()
     else:
+        # load the model
         embeddingModel = initAnyModel('gpt2File.pt')
 
+# The below conditional statement just displays how many words are assigned to each cluster
+# Useful for when manually setting the shift coefficients to split the words between experts
 if(shouldJustHelpPickClusterCenters):
     calculateClusterMeans(-1, embeddingModel)
     exit()
 
 initModel()
 
+# retrieve the embeddings from the shakespeare character model that we trained
 if(not shouldUseWordShakeSpeare and not shouldUseOpenWebText):
     embeddingModel = initAnyModel('embedding_only_otherwise_useless.pt')
     print("initialized embedding model for char")
@@ -1307,11 +1324,13 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
-
+# make note of the last percent accuracy we had so that we can quickly save the model if 
+# it rapidly jumps over a certain acurracy threshold. Useful for debugging because 
+# every time I found that it quickly learned above 95% accuracy there was a bug
 lastPercentCorrect = 0
 percentThreshold = 0.95
 
-
+# estimate loss and exit without training if appropriate
 if(shouldJustEstimateLoss):
     losses = ""
     if(shouldEstimateMoeLoss):
@@ -1322,11 +1341,12 @@ if(shouldJustEstimateLoss):
     print(f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
     exit()
 
+#make note of two start times, to be changed with different frequencies later
 runStartTime = time.time()
 tempStart = time.time()
-while expertNum < 2:
-    if(not tempStart == 0):
-        print("time for one iteration: " + str(time.time() - tempStart))
+while True:
+    # the following print will be meaningless the first iteration
+    print("time for one iteration: " + str(time.time() - tempStart))
     tempStart = time.time()
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
@@ -1337,8 +1357,6 @@ while expertNum < 2:
     # evaluate the loss on train/val sets and write checkpoints
     if (iter_num % eval_interval == 0) and master_process and testConfigs.shouldEvaluateAtAll:
         isCalculatingValidationLoss = True
-        if(lastPercentCorrect > percentThreshold):
-            breakpoint = 10
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
@@ -1349,6 +1367,8 @@ while expertNum < 2:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
+        # save the checkpoint only if validation loss decreased, or if a build switch says
+        # to always do so
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -1360,6 +1380,8 @@ while expertNum < 2:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
+                # save to two checkpoints files so that if we get interrupted part way through
+                # our save we don't end up corrupting our only copy of our model
                 print(f"saving backup (called second) checkpoint to {out_dir}")
                 checkPoint2Name = 'Expert' + str(expertNum) + 'Secondckpt.pt'
                 torch.save(checkpoint, os.path.join(out_dir, checkPoint2Name))
@@ -1388,8 +1410,10 @@ while expertNum < 2:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             if(expertNum == -1):
+                # weight the classes so that the router doesn't just become a dummy classifier
                 Z = weightClasses(Y, Z)
                 if(shouldIgnoreStronglyCorrectRouterChoices):
+                    # decide which values the router is already so sure of that it shouldn't learn from them
                     print("shouldIgnoreStronglyCorrectRouterChoices is true")
                     with torch.no_grad():
                         logits, loss = callModel(X, Y, Z, model)
@@ -1398,10 +1422,10 @@ while expertNum < 2:
                         if(rand==0):
                             if(shouldIgnoreStronglyCorrectRouterChoices):
                                 Ztemp = getStronglyCorrectRouterChoices(logits, Y, embeddingModel)
-                                Ztemp = torch.where(Z == 1, 0, 1)
-                                Z = torch.where(Ztemp==0, 0, Z)
+                                Z = torch.where(Ztemp==1, 0, Z)
             logits, loss = callModel(X, Y, Z, model)
             
+            # now calculate the percent accuracy according to the model type (router or expert)
             numTargetWords = Y.size()[0] * Y.size()[1] #batch size * block size
             percentCorrect = 0
             if(expertNum == -1):
