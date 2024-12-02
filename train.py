@@ -90,6 +90,7 @@ inTraining = False
 shiftCoefficient0 = 0.25
 shiftCoefficient1 = 0.743
 
+#Decide whether to import the modified model based on the build switch
 if(shouldJustEstimateLoss):
     shouldUseUntouched = False
 if(shouldUseUntouched):
@@ -118,8 +119,9 @@ if(shouldJustEstimateLoss):
 wandb_log = False # disabled by default 
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
+
 # data
-dataset = 'openwebtext'
+dataset = 'openwebtext' #this variable is usually overwritten from a config file
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -147,7 +149,6 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-#device = 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -156,6 +157,8 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 binExtension = ""
+
+# read in the expert number for the gpt model
 if(sys.argv[1] == "config/train_gpt2.py"):
     if(len(sys.argv) > 2):
         try:
@@ -171,15 +174,14 @@ else:
 
 
 
-#Cole! this is where you assign the variables that you want to override the config file
-if(expertNum == -1):
-    dropout = 0.0
+# The config file is already loaded here, so if you assign any values to variables below
+# here, they will override the config file.
+
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-#ddp = False
-#device = 'cpu'
 if ddp:
+    # Setup for dynamic parralel processing
     init_process_group(backend=backend)
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
@@ -213,41 +215,11 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 
-def k_means_balanced(data, k=2, max_iter=100):
-    # Randomly initialize centroids
-    indices = torch.randperm(data.size(0))[:k]
-    centroids = data[indices]
-
-    for _ in range(max_iter):
-        # Step 2: Assign clusters
-        dists = torch.cdist(data, centroids)
-        cluster_assignments = torch.argmin(dists, dim=1)
-
-        # Step 3: Update centroids
-        new_centroids = torch.stack([data[cluster_assignments == i].mean(dim=0) for i in range(k)])
-
-        # Step 4: Balancing clusters
-        if _ < max_iter - 1:  # Skip on last iteration
-            for i in range(k):
-                members = data[cluster_assignments == i]
-                other_members = data[cluster_assignments != i]
-                if members.size(0) > data.size(0) // k:
-                    # More members than the balance allows
-                    excess = members.size(0) - data.size(0) // k
-                    distances_to_other_centroid = torch.cdist(members, new_centroids[1-i].unsqueeze(0))
-                    # Indices of the farthest 'excess' points to reassign
-                    indices_to_reassign = distances_to_other_centroid.squeeze().topk(excess, largest=True).indices
-                    cluster_assignments[cluster_assignments == i][indices_to_reassign] = 1 - i
-
-        # Check for convergence (if centroids do not change)
-        if torch.allclose(new_centroids, centroids, atol=1e-5):
-            break
-        centroids = new_centroids
-
-    return centroids, cluster_assignments
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+
+# Setup to choose the centroids
 maxMinSet = False
 max_value = 0
 min_value = 0
@@ -261,10 +233,14 @@ maxs = 0
 
 
 
-#Warning! The below two variables are only useful for shakespeare char!
+# The below two variables are only useful for shakespeare char!
 marginShiftCoefficient0 = 0.4
 marginShiftCoefficient1 = 0.6
 
+# This function finds the centroids of the clusters by performing a 
+# simplified algorithm similar to principle component analysis, and then
+# selecting points along the principal axis using the portions chosen
+# in the configuration files.
 def calculateClusterMeans(expertNum, model):
     global centroid0
     global centroid1
@@ -292,7 +268,8 @@ def calculateClusterMeans(expertNum, model):
         count = 0
         numValuesToCross = 1000 * 1000
 
-        # Iterate through the data array
+        # Iterate through the data array, and look for the max, min,
+        # and average word indeces.
         for value in data:
             mid += value
             count += 1
@@ -309,10 +286,8 @@ def calculateClusterMeans(expertNum, model):
 
         ckpt_path = os.path.join(out_dir, 'centroids.pt')
 
-        # Load the centroids if the file exists
-        print("mid: " + str(mid))
-        print("max_value: " + str(max_value))
-        print("min_value: " + str(min_value))
+        # Make a list of all the word indeces from 0 up to max_value, and move 
+        # it to the gpu with the model and its embeddings
         allTokens = torch.arange(0, max_value + 1)
         allTokens = allTokens.to(device)
         model = model.to(device)
@@ -322,10 +297,12 @@ def calculateClusterMeans(expertNum, model):
         tok_emb.to(device)
         centroids = torch.zeros(2, tok_emb.size(1))
 
+        # Find the two points in embedding space storing the min and max possible 
+        # values in the entire embedding space. The main line will run between these
+        # points
         mins = torch.zeros(tok_emb.size(1))
         mins += 100000
         mins = mins.to(device)
-        print("mins created")
         maxs = torch.zeros(tok_emb.size(1))
         maxs -= 100000
         maxs = maxs.to(device)
@@ -333,44 +310,25 @@ def calculateClusterMeans(expertNum, model):
 
         mins = torch.min(tok_emb, dim=0)[0]
         maxs = torch.max(tok_emb, dim=0)[0]
-        print("mins.size: " + str(mins.size()))
-        '''
-        for token in tok_emb:
-            tokenCount += 1
-            if(tokenCount % 10 == 0):
-                print("token count: " + str(tokenCount))
-                print("token_emb_size: " + str(tok_emb.size()))
-                print("size of token: " + str(token.size(0)))
-            for i in range(token.size(0)):
-                if token[i] < mins[i]:
-                    mins[i] = token[i]
-                if token[i] > maxs[i]:
-                    maxs[i] = token[i]
-        '''
-                    
+
+
+        # Set the centroids of the clusters corresponding to the two experts
+        # to two points on the main line such that the vocab is divided in half
         for i in range(tok_emb.size(1)):
-            print("i: " + str(i))
-            print("centroids[0].size():" + str(centroids[0].size()))
-            print("mins.size():" + str(mins.size()))
-            print("maxs.size():" + str(maxs.size()))
             centroids[0][i] = mins[i] + (maxs[i] - mins[i])*shiftCoefficient0
             centroids[1][i] = mins[i] + (maxs[i] - mins[i])*shiftCoefficient1
         marginPoint0 = mins + (maxs - mins)*marginShiftCoefficient0
         marginPoint1 = mins + (maxs - mins)*marginShiftCoefficient1
-        #centroids, assignments = k_means_balanced(tok_emb, k=2, max_iter=1000)
         torch.save(centroids, ckpt_path)
         
         centroid0 = centroids[0]
         centroid1 = centroids[1]
-        #print("centroid0: " + str(centroid0))
-        #print("centroid1: " + str(centroid1))
 
-        #exit()
-        #if os.path.exists(ckpt_path):
-        #    loaded_centroids = torch.load(ckpt_path)
         cluster0 = 0
         cluster1 = 0
 
+        # Calculate the number of words that are closer to each centroid,
+        # and if it isn't roughly half and half, print a message and exit
         centroid0Temp = centroids[0].unsqueeze(0).to(device)
         centroid1Temp = centroids[1].unsqueeze(0).to(device)
         dist0 = torch.norm(tok_emb - centroid0Temp, dim = -1)
@@ -387,14 +345,10 @@ def calculateClusterMeans(expertNum, model):
         maxs = maxs.to(device)
         centroid0 = centroid0.to(device)
         centroid1 = centroid1.to(device)
-        dis0Diff = (mins - centroid0).norm()
-        dis1Diff = (maxs - centroid1).norm()
 
         if(absDiff > margin):
             print("cluster0: " + str(cluster0))
             print("cluster1: " + str(cluster1))
-            print("dis0Diff: " + str(dis0Diff))
-            print("dis1Diff: " + str(dis1Diff))
             print("absdiff: " + str(absDiff))
             print("margin: " + str(margin))
         
@@ -404,13 +358,13 @@ def calculateClusterMeans(expertNum, model):
             exit()
         
         if(shouldJustHelpPickClusterCenters):
+            # Extra print statements 
+            # Since this condition is only triggered when debugging
             print("cluster0: " + str(cluster0))
             print("cluster1: " + str(cluster1))
-            print("dis0Diff: " + str(dis0Diff))
-            print("dis1Diff: " + str(dis1Diff))
             exit()
 
-# the expert num parameter is used only to determine whether we can use expert -1's embeddng space to calculate the cluster means
+# This function from nanogpt gets a batch to train on asynchronously
 def get_batch(split):
     global maxMinSet
     global max_value
@@ -421,6 +375,7 @@ def get_batch(split):
     global binExtension
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    # Decide which file to get the data from
     if split == 'train':
         fileName = "train" + binExtension
         data = np.memmap(os.path.join(data_dir, fileName), dtype=np.uint16, mode='r')
@@ -428,6 +383,8 @@ def get_batch(split):
         fileName = "val" + binExtension
         data = np.memmap(os.path.join(data_dir, fileName), dtype=np.uint16, mode='r')
     counts = []
+    # count up how many of each type of value there are, and find the max, min, and average
+    # word indeces from the training data
     for i in range(0, 256):
         counts.append(0)
     for(i, value) in enumerate(data):
@@ -439,6 +396,7 @@ def get_batch(split):
         max_value = 0
         min_value = 100000
         count = 0
+        numValuesToCross = 1000 * 1000
         # Iterate through the data array
         for value in data:
             mid += value
@@ -447,31 +405,18 @@ def get_batch(split):
                 max_value = value
             if value < min_value:
                 min_value = value
+            if(count > numValuesToCross and shouldUseOpenWebText):
+                break
         mid = int(mid / count)
         #mid = int(max_value/2)
 
+    # select random values to use to 
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    '''
-    maxTrainIndex = 0
-    maxIndex = len(data)
-    if split == 'train':
-        valData = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-        maxIndex = len(valData)
-
-    ix = torch.randint(maxIndex - block_size, (batch_size,))
-    '''
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        #if ddp:
-        #x.pin_memory().to('cuda:1', non_blocking=True), y.pin_memory().to('cuda:1', non_blocking=True)
-        #x.pin_memory().to('cuda:2', non_blocking=True), y.pin_memory().to('cuda:2', non_blocking=True)
-        #x.pin_memory().to('cuda:3', non_blocking=True), y.pin_memory().to('cuda:3', non_blocking=True)
-        #x, y = x.pin_memory().to('cuda:0', non_blocking=True), y.pin_memory().to('cuda:0', non_blocking=True)
-
-        #else:
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
@@ -482,6 +427,8 @@ def get_batch(split):
 import torch.nn as nn
 import torch.nn.functional as F
 
+# The below class can be used to convert embeddings back to the word index of the 
+# word with the closest embedding of all the words in the vocabulary
 class EmbeddingReverser:
     def __init__(self, embedding_layer):
         self.embedding_layer = embedding_layer
@@ -499,30 +446,22 @@ class EmbeddingReverser:
         
         return recovered_indices
     
-def printIfPCR(input):
-    global inPercentCorrectRouterChoices
-    if(inPercentCorrectRouterChoices):
-        #print(input)
-        junk = 2
 
-transformYCount = 0
-#email address: sthompson@uvic.ca  press 3 then 1
-#francisco: fcanjura@uvic.ca
-#takes in the one digit values, does not take in logits
+# Takes in the one digit values, does not take in logits
+# if we are training an expert this function does nothing
+# if we are training a router it transforms all the words
+# into the word corresponding to the center of the cluster
+# that they are a part of
 def transformY(Y):
-    global transformYCount
     global expertNum
     global embeddingModel
     global centroid1
     global centroid0
     global mins
     global maxs
-    global inPercentCorrectRouterChoices
 
-    startTime = time.time()
-    #print("Y dim: " + str(Y.size()))
-    #exit()
-
+    # get the embeddings from the word indeces,
+    # and find their distances to the centroids
     tok_emb = getModelTransformer(embeddingModel).wte(Y)
     tok_emb.to(device)
     centroid0 = centroid0.to(device)
@@ -533,57 +472,23 @@ def transformY(Y):
 
     if(expertNum==-1):
         numDims = tok_emb.size()[-1]
-        #transformedEmbeddings = torch.zeroes_like(tok_emb)
+        # transform every embedding into the centroid that it is closest to
         wherePutMin = torch.where(dis0 < dis1, 1, 0)
-        printIfPCR("dis0: " + str(dis0))
-        printIfPCR("dis1: " + str(dis1))
-        printIfPCR("wherePutMin: " + str(wherePutMin))
         wherePutMin = wherePutMin.unsqueeze(-1).repeat(1,1,numDims)
-        printIfPCR("wherePutMin post: " + str(wherePutMin))
-        #printIfInPercentCorrectRouterChoices("wherePutMin shape: " + str(wherePutMin.size()))
-        #printIfInPercentCorrectRouterChoices("mins shape: " + str(mins.size()))
-        #printIfInPercentCorrectRouterChoices("maxs shape: " + str(maxs.size()))
         transformedEmbeddings = torch.ones_like(tok_emb)
         transformedEmbeddings = torch.where(wherePutMin == 1, mins, maxs)
-        printIfPCR("tok_emb: " + str(tok_emb))
-        printIfPCR("transformedEmbeddings: " + str(transformedEmbeddings))
 
-        # Instantiate the reverser
+        # convert the transformed embeddings back into word indeces
         reverser = EmbeddingReverser(getModelTransformer(embeddingModel).wte)
-
-        # Reverse the first embedding
         recovered_indeces = reverser.reverse(transformedEmbeddings)
-        printIfPCR("recovered_indeces: " + str(recovered_indeces))
         Y = recovered_indeces
-        transformYCount += 1
-
-
-    '''
-    centroid = centroid0
-    if(expertNum == 0):
-        centroid = centroid0
-    
-        #Y = Y * 2
-    elif(expertNum == 1):
-        centroid = centroid1
-
-    tok_emb = getModelTransformer(baseModel).wte(Y)
-    tok_emb.to(device)
-    diffs = 
-        #Y = (Y - mid) * 2
-    '''
     return Y
 
-def untransformY(Y):
-    global expertNum
-    '''
-    if(expertNum == 0):
-        Y = Y * mid/float(max_value)
-    elif(expertNum == 1):
-        Y = Y * mid/float(max_value) + mid
-    '''
-    return Y
-
+# Determines which indeces should not be trained on. For example,
+# when expert 1 is training, if for a given word the answer is "dog"
+# and dog is not in the vocabulary of expert 1, then expert 1 should
+# not use this word to calculate the loss, since it doesn't need to 
+# learn that.
 def getZ(Y):
     global expertNum
     global max_value
@@ -599,45 +504,36 @@ def getZ(Y):
         Z = Y - Z
         #the below means we are training a non-expert model
         if(expertNum == -1):
-            # make it just be all ones
+            # make it just be all ones, since expert -1 (the router) needs to learn
+            # to select the correct expert for every word
             Z = torch.ones_like(Y)
         else:
             startTime = time.time()
+            # Calculate the distances to both centroids from each expert
+            # and assign each word only to the expert who's centroid is
+            # closest to said word
             tok_emb = getModelTransformer(embeddingModel).wte(Y)
             tok_emb.to(device)
             centroid0 = centroid0.to(device)
             centroid1 = centroid1.to(device)
             dis0 = torch.norm(tok_emb - centroid0, dim = -1)
             dis1 = torch.norm(tok_emb - centroid1, dim = -1)
-            #print("dis0: " + str(dis0))
-            #print("shape of dis0: " + str(dis0))
 
             if(expertNum == 0):
-                #print("shape of dis0: " + str(dis0.size()))
-                #Z = (Z <= 0).int()
                 Z = dis0 < dis1
-                #Z = torch.where(torch.cdist(tok_emb, centroid0) < torch.cdist(tok_emb, centroid1), 1, 0)
-                #print("z size: " + str(Z.size()))
-                #exit()
-
-                #print("time to calculate Z: " + str(time.time() - startTime))
-                #print("start time: " + str(startTime))
-                #exit()
             #expert 1 handles the values that are greater than the mid value
             elif(expertNum == 1):
-                #Z = (Z > 0).int()
                 Z = dis0 >= dis1
-                #Z = torch.where(torch.cdist(tok_emb, centroid1) <= torch.cdist(tok_emb, centroid0), 1, 0)
-
 
             else:
                 print("invalid expert number: " +   str(expertNum))
                 exit()
     elif(shouldDoCloseToMidDivision):
+        # use word indeces instead of embeddings to determine which expert we assign each word to
         Z = Y - Z
         Z = Z.abs()
         allowedDis = (max_value - min_value)/4
-        #the below means we are training a non-expert model
+        #the below means we are training a non-expert model, or a router
         if(expertNum == -1):
             # make it just be all ones
             Z = torch.ones_like(Y)
@@ -647,22 +543,16 @@ def getZ(Y):
             Z = torch.where(Z>=allowedDis, 1, 0)
     return Z
 
-def printYandZ(Y, Z):
-    print("mid: " + str(mid))
-    print("Y:")
-    print(Y.size())
-    print(Y)
-    print("Z:")
-    print(Z.size())
-    print(Z)
-    exit()
 
+# The below is a custom training function I created when the router was not
+# Working well to try to make it only focus on the words it wasn't already 
+# Getting correct. The function didn't help much honestly
 def getStronglyCorrectRouterChoices(logits, targets, embeddingModel):
     global mins
     global centroid0
     global centroid1
 
-    numDims = logits.size()[-1]
+    # first, determine which centroid each output is closest to
     output = torch.argmax(logits, dim=2)
 
     outputEmbeddings = getModelTransformer(embeddingModel).wte(output)
@@ -670,79 +560,62 @@ def getStronglyCorrectRouterChoices(logits, targets, embeddingModel):
     
     centroid0 = centroid0.to(device)
     centroid1 = centroid1.to(device)
+
     dis0 = torch.norm(targetEmbeddings - centroid0, dim = -1)
     dis1 = torch.norm(targetEmbeddings - centroid1, dim = -1)
 
     ShouldBeMin = torch.where(dis0 < dis1, 1, 0)
 
-    #print("ShouldBeMin: " + str(ShouldBeMin))
-    #exit()
-    #shouldBeMin = shouldBeMin.unsqueeze(-1).repeat(1,1,numDims)
-
+    # Calculate the distances of all output values to the centroids, and mark them
+    # to be omitted from the loss function if they are already sufficiently close
     disToTarget = torch.norm(outputEmbeddings - targetEmbeddings, dim = -1)
     margin0ToTargetDistance = torch.norm(targetEmbeddings - marginPoint0, dim = -1)
     margin1ToTargetDistance = torch.norm(targetEmbeddings - marginPoint1, dim = -1)
-    #print("should be min shape: " + str(ShouldBeMin.size()))
-    #print("margin0ToTargetDistance shape: " + str(margin0ToTargetDistance.size()))
-    #print("margin1ToTargetDistance shape: " + str(margin1ToTargetDistance.size()))
     marginToTargetDistance = torch.where(ShouldBeMin == 1, margin0ToTargetDistance, margin1ToTargetDistance)
     closerThanMargin = torch.where(disToTarget < marginToTargetDistance, 1, 0)
     
-    #the below line effectively disables this function so we can test how well it learns without this
-    #closerThanMargin = torch.zeros_like(closerThanMargin)
     return closerThanMargin
 
 isCalculatingValidationLoss = False
 validationLossIterationCount = 0
-def printRouterOutputAndTargets(output, targets):
-    global isCalculatingValidationLoss
-    if(isCalculatingValidationLoss):
-        thereAreFours = torch.where(output == 4, 1, 0).any()
-        if(thereAreFours):
-            breakpoint = 10
-        else:
-            breakpoint = 10
-        #print("outputs: " + str(output))
-        #print("targets: " + str(targets))
 
+
+# This function helps us calculate accuracy
 def getCorrectRouterChoices(logits, targets, Z):
+    # Set the output matrix to 1 at the locations where outputs matches targets
     output = torch.argmax(logits, dim=2)
-    #print("transformYCount: " + str(transformYCount))
-    #exit()
-    #print("output size: " + str(output.size()))
-    #print("targets size: " + str(targets.size()))
-    #exit()
     output = transformY(output)
-    printRouterOutputAndTargets(output, targets)
     routerCorrectWords = torch.where(output == targets, 1, 0)
     routerCorrectWords = torch.where(Z == 1, routerCorrectWords, 0)
     return routerCorrectWords
 
-inPercentCorrectRouterChoices = False
+# This function calculates accuracy for the router
 def getPercentCorrectRouterChoices(logits, targets, Z, numTargetWords):
-    global inPercentCorrectRouterChoices
-    inPercentCorrectRouterChoices = True
+    #find which words were chosen correctly
     routerCorrectWords = getCorrectRouterChoices(logits, targets, Z)
     routerCorrectCountedWords = torch.where(routerCorrectWords == 1, 1, 0)
+    #count correctly chosen words, and divide by the relevant number
     numRouterCorrectWords = routerCorrectCountedWords.sum()
     numRelevantTargetWords = torch.where(Z == 1, 1, 0).sum()
     routerPercentCorrect = float(numRouterCorrectWords)/numRelevantTargetWords
-    inPercentCorrectRouterChoices = False
     return routerPercentCorrect
 
-#make sure expertNum is set correctly before calling this function
+# Make sure expertNum is set correctly before calling this function
+# as it just uses the global value, it doesn't take a parameter
 def getPercentCorrectExpertWords(logits, targets, Z, numTargetWords):
     output = torch.argmax(logits, dim=2)
-    untransformY(output)
+    # count the number of cases where output matches targets
     expertCorrectWords = torch.where(output == targets, 1, 0)
     expertCorrectWords = torch.where(Z == 1, expertCorrectWords, -1)
     expertCorrectCountedWords = torch.where(expertCorrectWords == 1, 1, 0)
     numExpertCorrectCountedWords = expertCorrectCountedWords.sum()
+    # divide the number of correct words by the number of words assigned to the expert
     expertUncountedWords = torch.where(expertCorrectWords == -1, 1, 0)
     numExpertUncountedWords = expertUncountedWords.sum()
     expertPercentCorrect = float(numExpertCorrectCountedWords)/(numTargetWords - numExpertUncountedWords)
     return expertPercentCorrect
 
+# The below function find % accuracy for a regular non moe model
 def getPercentCorrect(y, logits):
     vals = logits.argmax(dim=-1)
     correct = torch.where(vals == y, 1, 0).sum()
@@ -750,11 +623,12 @@ def getPercentCorrect(y, logits):
     percentCorrect = correct*100 / total
     return percentCorrect
 
-
+# Just a function to print only if a certain build switch is True
 def printTimeIfAppropriate(inStr):
     global shouldPrintTimes
     if(shouldPrintTimes):
         print(inStr)
+
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_simple_loss():
@@ -765,18 +639,21 @@ def estimate_simple_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        # prepare to score for the split
         percentsCorrect = torch.zeros(eval_iters)
         startTime = 0
         hasPrinted = False
         startIter = 2
         tempStart = 0
-        #Z = torch.zeros_like(Y)
         for k in range(eval_iters):
+            # keep track of time
             if(k==startIter):
                 startTime = time.time()
             tempStart2 = time.time()
+            #retrieve a batch and print how long the synchronous part took
             X, Y = get_batch(split)
             printTimeIfAppropriate("time for one getting one batch: " + str(time.time() - tempStart2))
+            # print how long the first few iterations take
             if(float(k-startIter)/eval_iters > 0.05 and not hasPrinted):
                 print(f"percent done with {split} is: {float(k)/eval_iters}")
                 diff = time.time() - startTime
@@ -785,42 +662,25 @@ def estimate_simple_loss():
                 print("split is: ", split)
 
                 hasPrinted = True
-            #numTargetWords = Y.size()[0] * Y.size()[1] #batch size * block size
-            Z = getZ(Y)
-            
+            # print how long the previous iteration took
             if(not (tempStart == 0)):
                 printTimeIfAppropriate("time for one iteration: " + str(time.time() - tempStart))
             tempStart = time.time()    
             tempStart2 = time.time()
-            #Y = transformY(Y)
-            #print("time for one transformation: " + str(time.time() - tempStart2))
-            tempStart2 = time.time()
-            #if(expertNum == -1):
-            #    Z = weightClasses(Y, Z)
-            #print("time for weightClasses: " + str(time.time() - tempStart2))
             with ctx:
-                tempStart2 = time.time()
-                #logits, loss = callModel(X, Y, Z, model)
                 logits = 0
                 loss = 0
+                # call the model and time how long this takes for comparison against the time
+                # to retrieve a batch
                 printTimeIfAppropriate("time before callModel\n", time.time())
-                #if(shouldUseUntouched):
-                #    logits, loss = model(X, Y)
-                #else:
-                #    logits, loss = model(X, Y, Z)
                 logits, loss = model(X, Y)
 
                 printTimeIfAppropriate("time after callModel\n", time.time())
 
                 printTimeIfAppropriate("time for callModel: " + str(time.time() - tempStart2))
                 tempStart2 = time.time()
+                # record the accuracy and add it and the loss to the appropriate lists
                 percentCorrect = getPercentCorrect(Y, logits)
-                #routerPercentCorrect = 0
-                #if(expertNum == -1):
-                #    routerPercentCorrect = getPercentCorrectRouterChoices(logits, Y, Z, numTargetWords)
-                #    validationLossIterationCount += 1
-                #print("time for getPercentCorrect: " + str(time.time() - tempStart2))
-            #percentsCorrect[k] = routerPercentCorrect
             percentsCorrect[k] = percentCorrect
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -841,6 +701,7 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        # prepare to score for the split
         percentsCorrect = torch.zeros(eval_iters)
         startTime = 0
         hasPrinted = False
@@ -848,42 +709,50 @@ def estimate_loss():
         tempStart = 0
 
         for k in range(eval_iters):
+            # keep track of time
             if(k==startIter):
                 startTime = time.time()
             tempStart2 = time.time()
+            #retrieve a batch and print how long the synchronous part took
             X, Y = get_batch(split)
             printTimeIfAppropriate("time for one getting one batch: " + str(time.time() - tempStart2))
+            # print how long the first few iterations take
             if(float(k-startIter)/eval_iters > 0.05 and not hasPrinted):
                 print(f"percent done with {split} is: {float(k)/eval_iters}")
                 diff = time.time() - startTime
                 print("time gone by in seconds: ", diff)
                 print("so estimated total time is ", (diff * eval_iters) / (float(k-startIter)) )
                 print("split is: ", split)
-
                 hasPrinted = True
+
             numTargetWords = Y.size()[0] * Y.size()[1] #batch size * block size
+            # Decide which words to mask out if any
             Z = getZ(Y)
+            # print how long the previous iteration took
             if(not (tempStart == 0)):
                 printTimeIfAppropriate("time for one iteration: " + str(time.time() - tempStart))
             tempStart = time.time()    
             tempStart2 = time.time()
+            # transform Y to be just the two centroids if we are using the router, then print how long it took
             Y = transformY(Y)
             printTimeIfAppropriate("time for one transformation: " + str(time.time() - tempStart2))
             tempStart2 = time.time()
+            # weight classes if using the router since they are imbalanced, and print how long it took
             if(expertNum == -1):
                 Z = weightClasses(Y, Z)
             printTimeIfAppropriate("time for weightClasses: " + str(time.time() - tempStart2))
-            #printYandZ(Y, Z)
             with ctx:
+                # call the model and time how long this takes for comparison against the time
+                # to retrieve a batch
                 tempStart2 = time.time()
                 logits, loss = callModel(X, Y, Z, model)
                 printTimeIfAppropriate("time for callModel: " + str(time.time() - tempStart2))
                 tempStart2 = time.time()
                 percentCorrect = 0
+                # calculate the accuracy for the router or expert as appropriate
                 if(not expertNum == -1):
                     totalNumWords = Z.size()[0] * Z.size()[1]
                     percentCorrect = getPercentCorrectExpertWords(logits, Y, Z, totalNumWords)
-                    #percentCorrect = getPercentCorrect(Y, logits)
                 routerPercentCorrect = 0
                 if(expertNum == -1):
                     routerPercentCorrect = getPercentCorrectRouterChoices(logits, Y, Z, numTargetWords)
@@ -891,16 +760,17 @@ def estimate_loss():
                     percentCorrect = routerPercentCorrect
                 
                 printTimeIfAppropriate("time for getPercentCorrect: " + str(time.time() - tempStart2))
+            # add the calculated loss and accuracy values to the lists
             losses[k] = loss.item()
-
             percentsCorrect[k] = percentCorrect
+        # calculate the mean losses and accuracies
         out[split] = losses.mean()
         print("percent correct for " + split + ": " + str(percentsCorrect.mean()))
     model.train()
     inTraining = True
     return out
 
-# helps estimate an arbitrarily accurate loss over either split using many batches
+# estimates the loss for the whole system of all 3 models at once
 @torch.no_grad()
 def estimate_expert_loss():
     global ddp
@@ -913,6 +783,7 @@ def estimate_expert_loss():
         losses = torch.zeros(eval_iters)
         model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                     bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+        # load expert 0
         ckpt_path = os.path.join(out_dir, 'Expert0ckpt.pt')
         checkpoint = torch.load(ckpt_path, map_location=device)
         checkpoint_model_args = checkpoint['model_args']
@@ -958,7 +829,7 @@ def estimate_expert_loss():
             print("ddp is true")
             model0 = DDP(model0, device_ids=[ddp_local_rank])
 
-
+        # load expert 1
         model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                     bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
         ckpt_path = os.path.join(out_dir, 'Expert1ckpt.pt')
@@ -1008,72 +879,42 @@ def estimate_expert_loss():
         
 
         for i in range(eval_iters):
+            # set expertNum before getting and transforming data so it gets transformed correctly
             expertNum = -1
             X, Y = get_batch(split)
-            #Z = getZ(Y)
-
-            # now I want to see how to router does just the words for expert 1
-            #expertNum = 1
             Z = torch.ones_like(Y)
-            expertNum = -1
-
-
 
             targetsRouter = Y
             targetsRouter = transformY(targetsRouter)
-            #print("embedRouter:" + str(embedRouter[0][0]))
-            #print("embed0:" + str(emed0[0][0]))
-            #exit()
             with ctx:
+                # get the number of words, and the router's choices
                 numTargetWords = Y.size()[0] * Y.size()[1] #batch size * block size
-                #logitsRouter, lossRouter = callModel(X, Y, Z, model)
                 logitsRouter, lossRouter = callModel(X, targetsRouter, Z, model)
                 
-                
-                #print("logitsRouter: " + str(logitsRouter))
+                # mark the words where the router chose expert 0
                 routerChoices = torch.argmax(logitsRouter, dim=2)
                 routerChoicesEmbeddings = getModelTransformer(embeddingModel).wte(routerChoices)
                 dis0 = torch.norm(routerChoicesEmbeddings - centroid0, dim = -1)
                 dis1 = torch.norm(routerChoicesEmbeddings - centroid1, dim = -1)
                 routerChose0 = torch.where(dis0 < dis1, 1, 0)
-                routerChose1 = torch.where(dis1 < dis0, 1, 0)
-                #routerOut = transformY(routerChoices)
-                #print("routerOut: " + str(routerOut))
-                #exit()
-                #routerOut = torch.argmax(logitsRouter, dim=2)
-
-                #one where correct, zero where incorrect, -1 where not trained
-                #routerCorrectWords = torch.where(routerOut == Y, 1, 0)
-                #numRouterCorrectWords = routerCorrectWords.sum()
-                #routerPercentCorrect = float(numRouterCorrectWords)/numTargetWords
-
-
-                #routerPercentCorrect = getPercentCorrectExpertWords(logitsRouter, Y, Z, numTargetWords)
+                
+                #evaluate the accuracy of the router
                 routerPercentCorrect = getPercentCorrectRouterChoices(logitsRouter, targetsRouter, Z, numTargetWords)
                 
                 #DO NOT UNCOMMENT FOLLOWING LINE EXCEPT FOR TESTS! It adjust the router output here to falsely be always right
                 #routerOut = Y.clone()
 
+                # copy targets and transform them into the correct domains for each expert
                 targets0 = Y
                 targets1 = Y
                 expertNum = 0
                 targets0 = transformY(targets0)
                 expertNum = 1
                 targets1 = transformY(targets1)
-
-                #targets0 = Y * 2
-                #targets1 = (Y - mid) * 2
-
-                X.to(device)
-                Y.to(device)
                 
                 expertNum = 0
                 Z0 = getZ(Y)
-                #THE BELOW LINE MUST BE COMMENTED! IT BREAKS THE CODE!
-                #Z0 = getZ(targets0)
                 Z0.to(device)
-                #model0.to(device)
-                #model0.eval()
                 logits0, loss0 = callModel(X, targets0, Z0, model0)
                 expert0PercentCorrect = getPercentCorrectExpertWords(logits0, targets0, Z0, numTargetWords)
 
@@ -1090,27 +931,19 @@ def estimate_expert_loss():
                     print("there is an untrained word")
                     print("biggerZ: " + str(biggerZ))
                     exit()
-                #else:
-                    #print("all words are trained")
+
 
                 
                 # Ensure routerOut has the same shape as logits0 and logits1
-                #routerOut_expanded = routerOut.unsqueeze(-1).expand_as(logits0)
                 routerChose0_expanded = routerChose0.unsqueeze(-1).repeat(1,1,logits0.size(-1))
-
-                #make it so routerout is artificially always right
-                if(shouldIdealizeMoeRouterForTests):
-                    routerOut_expanded = Y.unsqueeze(-1).expand_as(logits0)
 
                 # Combine the logits tensors based on the condition
                 logitsCombined = torch.where(routerChose0_expanded == 1, logits0, logits1)
                 moePercentCorrect = getPercentCorrect(Y, logitsCombined)
                 
-                #Z0Expanded = Z0.unsqueeze(-1).expand_as(logits0)
                 logits_flat = logitsCombined.view(-1, logitsCombined.size(-1))
 
                 #transform targets into the expert domain so we can evaluate the output:
-
                 targets = torch.where(Y <= mid, targets0, targets1)
                 targets_flat = targets.view(-1)
                 loss = model.get_cross_entropy(logits_flat, targets_flat, ignore_index=-1)
@@ -1178,14 +1011,6 @@ def weightClasses(Y, Z):
     zZeroes = torch.where(randomNumbers <= (portionToKeep * 100), 1, zZeroes)
     #make Z contain 0's where both conditions are true
     Z = torch.where(zZeroes == 0, 0, Z)    
-    
-    #the below variable is only for tests
-    '''yRelevant = torch.where(Z==1, Y, 0)
-    numMins = torch.where(yRelevant == minEquivalent, 1, 0).sum()
-    numMaxs = torch.where(yRelevant == maxEquivalent, 1, 0).sum()
-    totalNum = numMins + numMaxs
-    portionMins = float(numMins)/totalNum
-    portionMaxs = float(numMaxs)/totalNum'''
     return Z
 
 def callModel(X, Y, Z, model):
@@ -1198,14 +1023,9 @@ def callModel(X, Y, Z, model):
         allOnes = torch.ones_like(Z)
         total = allOnes.sum()
         numNumbers = torch.where(Z == 1, 1, 0).sum()
-        #if(inTraining):
-        #    print("total: " + str(total))
-        #    print("numNumbers: " + str(numNumbers))
-        #loss = loss * total/numNumbers
         return logits, loss
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
-#init_from = 'resume'
 if(shouldJustEstimateLoss or shouldReloadRouter):
     init_from = 'resume'
 iter_num = 0
@@ -1251,15 +1071,13 @@ def initAnyModel(fileName):
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, fileName)
-    #print(ckpt_path)
-    #exit()
+
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     model_args = {}
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        #print("model_args[" + k + "]: " + type(model_args[k])+ " " + str(model_args[k]))
         print("checkpoint_model_args[" + k + "]: " + str(type(checkpoint_model_args[k]))+ " " + str(checkpoint_model_args[k]))
         model_args[k] = checkpoint_model_args[k]
     # create the model
@@ -1282,7 +1100,6 @@ def initAnyModel(fileName):
     # compile the model
     if compile:
         print("compiling the model... (takes a ~minute)")
-        #unoptimized_model = model
         anyModel = torch.compile(anyModel) # requires PyTorch 2.0
     return anyModel
 
@@ -1294,6 +1111,8 @@ def getModelTransformer(model):
         transformer = model.transformer
     return transformer
 
+# This initializes a model for training or evaluation. Which model it initializes
+# is determined by the global variable expertNum
 def initModel():
     global model
     global checkpoint
@@ -1315,7 +1134,6 @@ def initModel():
         print("Initializing a new model from scratch")
         # determine the vocab size we'll use for from-scratch training
         if meta_vocab_size is None:
-            #print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
             print("defaulting to vocab_size of GPT-2 to " + str(embeddingModel.config.vocab_size))
         model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else embeddingModel.config.vocab_size
         
@@ -1330,7 +1148,6 @@ def initModel():
         for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
             model_args[k] = getattr(model.config, k)
 
-        
         # init a new model from scratch
         print("Initializing a new model from scratch")
         # determine the vocab size we'll use for from-scratch training
@@ -1347,10 +1164,6 @@ def initModel():
         # resume training from a checkpoint.
         ckpt_path = os.path.join(out_dir, toResumeName)
         print("ckpt_path: " + ckpt_path)
-        
-        #fileName = "train" + binExtension
-        #print("data path: ", os.path.join(data_dir, fileName))
-        #exit()
 
         checkpoint = torch.load(ckpt_path, map_location=device)
         checkpoint_model_args = checkpoint['model_args']
@@ -1376,8 +1189,6 @@ def initModel():
 
 
         model.load_state_dict(state_dict)
-        iter_num = checkpoint['iter_num']
-        best_val_loss = checkpoint['best_val_loss']
     elif init_from.startswith('gpt2'):
         print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
         # initialize from OpenAI GPT-2 weights
@@ -1433,35 +1244,25 @@ if((shouldUseWordShakeSpeare or shouldUseOpenWebText)):
         print(f"saving checkpoint to {out_dir}")
         checkPointName = 'gpt2File.pt'
         torch.save(checkpoint, os.path.join(out_dir, checkPointName))
-
-        #reloadEmbeddingModelForTests(embeddingModel)
         exit()
     else:
         embeddingModel = initAnyModel('gpt2File.pt')
-    #init_from = 'gpt2'
 
 if(shouldJustHelpPickClusterCenters):
     calculateClusterMeans(-1, embeddingModel)
     exit()
 
-#init_from = "resume"
-#init_from = "scratch"
-#if(expertNum == -1):
-#    n_layer *= 2
 initModel()
 
 if(not shouldUseWordShakeSpeare and not shouldUseOpenWebText):
     embeddingModel = initAnyModel('embedding_only_otherwise_useless.pt')
     print("initialized embedding model for char")
-    #print("embeddingModel: " + str(embeddingModel))
 
 embeddingModel.eval()
 if((not shouldJustEstimateLoss) and (not shouldEstimateMoeLoss) and expertNum == -1):
     #no need to create reference to transformer here because have not yet created a DDP container
-    #getModelTransformer(embeddingModel).wte.requires_grad = False
     if(init_from == 'scratch'):
         getModelTransformer(model).wte = copy.deepcopy(getModelTransformer(embeddingModel).wte)
-        #getModelTransformer(model).wte = getModelTransformer(embeddingModel).wte
     getModelTransformer(model).wte.requires_grad = True
     print("passed initModel")
 
@@ -1472,10 +1273,6 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     if(not shouldJustEstimateLoss):
-        #optimizer.load_state_dict(checkpoint['optimizer'])
-        #if(expertNum==-1):
-        #    getModelTransformer(embeddingModel).wte.requires_grad = False
-
         print("optimizer param list: " + str(optimizer.param_groups))
 checkpoint = None # free up memory
 
@@ -1486,18 +1283,9 @@ if compile:
 
     model = torch.compile(model) # requires PyTorch 2.0
     unoptimized_embeddingModel = embeddingModel
-    #print("embeddingModel pre compile: " + str(embeddingModel))
-    #embeddingModel = torch.compile(embeddingModel) # requires PyTorch 2.0
-    #print("embeddingModel post compile: " + str(embeddingModel))
 
 calculateClusterMeans(expertNum, embeddingModel)
-'''            
-i = 0
-while i < len(Y):
-    #print(Y[i])
-    if Y[i] > mid:
-        Z[i] = 1
-    i += 1'''
+
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
@@ -1584,7 +1372,6 @@ while expertNum < 2:
                 torch.save(checkpoint, os.path.join(out_dir, checkPointName))
                 print("done saving regular checkpoint")
 
-                #torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
         isCalculatingValidationLoss = False
     
     if iter_num == 0 and eval_only:
@@ -1600,19 +1387,15 @@ while expertNum < 2:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            #printYandZ(Y, Z)
             if(expertNum == -1):
                 Z = weightClasses(Y, Z)
                 if(shouldIgnoreStronglyCorrectRouterChoices):
                     print("shouldIgnoreStronglyCorrectRouterChoices is true")
                     with torch.no_grad():
                         logits, loss = callModel(X, Y, Z, model)
-                        #Z = getCorrectRouterChoices(logits, Y)
                         learnFromCorrectOptions = [0, 1]
                         rand = random.choice(learnFromCorrectOptions)
-                        #rand = 0
                         if(rand==0):
-                            #Z = getCorrectRouterChoices(logits, Y)
                             if(shouldIgnoreStronglyCorrectRouterChoices):
                                 Ztemp = getStronglyCorrectRouterChoices(logits, Y, embeddingModel)
                                 Ztemp = torch.where(Z == 1, 0, 1)
@@ -1634,15 +1417,11 @@ while expertNum < 2:
         X, Y = get_batch('train')
         runEndtime = time.time()
         runTime = runEndtime - runStartTime
-        #if(not shouldOnlyShowEvalOut):
-            #print("run time: " + str(runTime))
         prepStartTime = time.time()
         Z = getZ(Y)
         Y = transformY(Y)
         prepEndTime = time.time()
         prepTime = prepEndTime - prepStartTime
-        #if(not shouldOnlyShowEvalOut):
-            #print("prep time: " + str(prepTime))
         runStartTime = time.time()
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
@@ -1650,15 +1429,11 @@ while expertNum < 2:
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    #getModelTransformer(model).wte.requires_grad = False
-    #getModelTransformer(model).wte.zero_grad()
-
-    #getModelTransformer(embeddingModel).wte.requires_grad = False
-    
+    # step the optimizer and scaler if training in fp16    
     getModelTransformer(embeddingModel).wte.zero_grad()
     scaler.step(optimizer)
     scaler.update()
+
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
 
@@ -1677,11 +1452,6 @@ while expertNum < 2:
             print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
             print("percentCorrect: " + str(percentCorrect))
 
-            #if iter_num % (log_interval * 5) == 0:
-            #    if(not ddp):
-            #        print("model.wte 0 0: " + str(getModelTransformer(model).wte[0][0]))
-            #        print("embeddingModel.wte 0 0: " + str(getModelTransformer(embeddingModel).wte[0][0]))
-
     iter_num += 1
     local_iter_num += 1
 
@@ -1689,10 +1459,6 @@ while expertNum < 2:
     if iter_num > max_iters:
         exit()
         break
-        #if(expertNum == -1):
-        #    break
-        #expertNum += 1
-        #iter_num = 0
-        #print("now onto expert: " + str(expertNum))
+
 if ddp:
     destroy_process_group()

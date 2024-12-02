@@ -59,14 +59,10 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        #print("Time taken to split q, k, v: ", time.time()-startTime2)
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            #print("B, T, C: ", B, T, C)
-            #print("self.n_embd, self.n_head: ", self.n_embd, self.n_head)
-            #exit()
         else:
             print("using non flash attention")
             # manual implementation of attention
@@ -184,10 +180,8 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        #mask_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        mask = mask.unsqueeze(-1) # Now mask shape will be [64, 256, 1], doesn't need to be [64, 256, 384]
+        mask = mask.unsqueeze(-1) # Now mask shape will be [batch_size, sequence_len, 1], doesn't need to be [batch_size, sequence_len, emb_dim]
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        #print(x)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
@@ -224,14 +218,6 @@ class GPT(nn.Module):
                 exit()
             # Compute the loss using the modified targets
             loss = F.cross_entropy(logits_flat, masked_targets, ignore_index=ignore_index)
-
-            # This should give you the masked loss
-            #print(loss)
-
-            #maskSqueezed = mask.squeeze(-1)
-            #print("maskSqueezed: ", maskSqueezed.size())
-            #targetsTemp = targets*mask.squeeze(-1)
-            #loss = F.cross_entropy(logitsTemp.view(-1, logitsTemp.size(-1)), targetsTemp.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
