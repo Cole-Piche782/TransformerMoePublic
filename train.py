@@ -90,6 +90,10 @@ inTraining = False
 shiftCoefficient0 = 0.25
 shiftCoefficient1 = 0.743
 
+# make note of which indeces correspond to the max and min embeddings
+minEquivalent = 3
+maxEquivalent = 11
+
 #Decide whether to import the modified model based on the build switch
 if(shouldJustEstimateLoss):
     shouldUseUntouched = False
@@ -983,10 +987,6 @@ def get_lr(it):
 
 #only where Z contains a 1 does the code actually pay attention to the value. 0 means mask out the value
 def weightClasses(Y, Z):
-    # make note of which indeces correspond to the max and min embeddings
-    minEquivalent = 3
-    maxEquivalent = 11
-
     # count up how many times the Y value corresponds to the min and max
     numMins = torch.where(Y == minEquivalent, 1, 0).sum()
     numMaxs = torch.where(Y == maxEquivalent, 1, 0).sum()
