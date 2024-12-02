@@ -1,0 +1,7 @@
+# Custom Proprietary License
+
+This project is the proprietary property of Cole Piche. All rights are reserved.
+
+No part of this project, in any form or by any means, may be used, copied, modified, or distributed without the express written permission of the owner.
+
+Unauthorized use is strictly prohibited and may result in legal action.
