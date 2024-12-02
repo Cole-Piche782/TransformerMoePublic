@@ -6,6 +6,13 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
+
+'''
+Piche:
+I cannot guarantee the quality of code in this particular file since it 
+was copied from nanogpt and I only made changes to parts of it.
+'''
+
 #python train_modified_train_expert.py config/train_shakespeare_char.py
 import math
 import inspect

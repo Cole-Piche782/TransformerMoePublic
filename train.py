@@ -1,4 +1,5 @@
 """
+Karpathy:
 This training script can be run both on a single gpu in debug mode,
 and also in a larger training run with distributed data parallel (ddp).
 
@@ -16,6 +17,13 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
+'''
+Piche:
+There are some redudant parts of the code here
+They were introduced for ease of debugging and ease of comparing slight
+variations of the code. I have left them in in case I want to work further
+and the project and need to debug or compare more variations.
+'''
 import os
 import sys
 import time

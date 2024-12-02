@@ -1,4 +1,5 @@
 """
+Karpathy:
 Poor Man's Configurator. Probably a terrible idea. Example usage:
 $ python train.py config/override_file.py --batch_size=32
 this will first run config/override_file.py, then override batch_size to 32
@@ -14,6 +15,11 @@ complexity and having to prepend config. to every single variable. If someone
 comes up with a better simple Python solution I am all ears.
 """
 
+'''
+Piche:
+I cannot guarantee the quality of code in this particular file since it 
+was copied from nanogpt and I only made changes to parts of it.
+'''
 import sys
 from ast import literal_eval
 
