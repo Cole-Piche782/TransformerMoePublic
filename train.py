@@ -1434,16 +1434,17 @@ while True:
             else:
                 percentCorrect = getPercentCorrectExpertWords(logits, Y, Z, numTargetWords)
                 lastPercentCorrect = percentCorrect
-            if(expertNum == -1):
-                loss = loss / gradient_accumulation_steps
+            # divide loss by number of gradient accumulation steps if there are several
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         runEndtime = time.time()
         runTime = runEndtime - runStartTime
         prepStartTime = time.time()
+        # determine which values to mask, and transform Y into the domain of the current model
         Z = getZ(Y)
         Y = transformY(Y)
+        # time how long these transformations took
         prepEndTime = time.time()
         prepTime = prepEndTime - prepStartTime
         runStartTime = time.time()
