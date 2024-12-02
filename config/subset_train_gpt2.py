@@ -12,19 +12,12 @@ wandb_run_name='gpt2-124M'
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
 batch_size = 12
 block_size = 1024
-#block_size = int(1024/4 + 0.5)
 gradient_accumulation_steps = 5 * 8
-#gradient_accumulation_steps = 1
 
-# model
 # model
 n_layer = 12
 n_head = 12
 n_embd = 768
-#n_layer = int(12/2 + 0.5)
-#n_head = int(12/2 + 0.5)
-#n_embd = int(768/2+0.5)
-#n_embd = 64
 
 # this makes total number of tokens be 300B
 max_iters = 600000
@@ -44,7 +37,5 @@ shouldUseOpenWebText = True
 #coefficients to determine where we should put the two centroids
 shiftCoefficient0 = 0.487
 shiftCoefficient1 = 0.5
-#shiftCoefficient0 = 0.253
-#shiftCoefficient1 = 0.743
 haveReadShiftCoefficients = True
 shouldUseOpenWebText = True

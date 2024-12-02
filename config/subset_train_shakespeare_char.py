@@ -22,7 +22,6 @@ block_size = 256 # context of up to 256 previous characters
 n_layer = 6
 n_head = 6
 n_embd = 384
-#dropout = 0.2
 
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher
 max_iters = 5000
@@ -35,12 +34,6 @@ warmup_iters = 100 # not super necessary potentially
 #coefficients to determine where we should put the two centroids
 shiftCoefficient0 = 0.487
 shiftCoefficient1 = 0.5
-#shiftCoefficient0 = 0.2
-#shiftCoefficient1 = 0.3
-#shiftCoefficient0 = 0.05
-#shiftCoefficient1 = 0.1
-#shiftCoefficient0 = 0.25
-#shiftCoefficient1 = 0.743
 haveReadShiftCoefficients = True
 
 # on macbook also add
