@@ -90,9 +90,7 @@ inTraining = False
 shiftCoefficient0 = 0.25
 shiftCoefficient1 = 0.743
 
-# make note of which indeces correspond to the max and min embeddings
-minEquivalent = 3
-maxEquivalent = 11
+
 
 #Decide whether to import the modified model based on the build switch
 if(shouldJustEstimateLoss):
@@ -134,6 +132,9 @@ block_size = 1024
 n_layer = 6
 n_head = 6
 n_embd = 768
+
+minEquivalent = 3
+maxEquivalent = 11
 
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
